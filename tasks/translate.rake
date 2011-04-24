@@ -30,34 +30,51 @@ class Hash
       end
     end
   end
-
 end
 
 namespace :translate do
-  desc "Show I18n keys that are missing in the config/locales/default_locale.yml YAML file"
-  task :lost_in_translation => :environment do
-    LOCALE = I18n.default_locale
-    keys = []; result = []; locale_hash = {}
-    Dir.glob(File.join("config", "locales", "**","#{LOCALE}.yml")).each do |locale_file_name|
-      locale_hash = locale_hash.deep_merge(YAML::load(File.open(locale_file_name))[LOCALE])
-    end
-    lookup_pattern = Translate::Keys.new.send(:i18n_lookup_pattern)
-    Dir.glob(File.join("app", "**","*.{rb,rhtml}")).each do |file_name|
-      File.open(file_name, "r+").each do |line|
-        line.scan(lookup_pattern) do |key_string|
-          result << "#{key_string} in \t  #{file_name} is not in any locale file" unless key_exist?(key_string.first.split("."), locale_hash)
-        end
+  desc "Show untranslated keys for locale LOCALE"
+  task :untranslated => :environment do
+    from_locale = I18n.default_locale
+    untranslated = Translate::Keys.new.untranslated_keys
+
+    messages = []
+    untranslated.each do |locale, keys|
+      keys.each do |key|
+        from_text = I18n.backend.send(:lookup, from_locale, key)
+        messages << "#{locale}.#{key} (#{from_locale}.#{key}='#{from_text}')"
       end
     end
-    puts !result.empty? ? result.join("\n") : "No missing translations for locale: #{LOCALE}"
+      
+    if messages.present?
+      messages.each { |m| puts m }
+    else
+      puts "No untranslated keys"
+    end
+  end
+  
+  desc "Show I18n keys that are missing in the config/locales/default_locale.yml YAML file"
+  task :missing => :environment do
+    missing = Translate::Keys.new.missing_keys.inject([]) do |keys, (key, filename)|
+      keys << "#{key} in \t  #{filename} is missing"
+    end
+    puts missing.present? ? missing.join("\n") : "No missing translations in the default locale file"
   end
 
-  def key_exist?(key_arr,locale_hash)
-    key = key_arr.slice!(0)
-    if key
-      key_exist?(key_arr, locale_hash[key]) if (locale_hash && locale_hash.include?(key))
-    elsif locale_hash
-      true
+  desc "Remove all translation texts that are no longer present in the locale they were translated from"
+  task :remove_obsolete_keys => :environment do
+    I18n.backend.send(:init_translations)
+    master_locale = ENV['LOCALE'] || I18n.default_locale
+    Translate::Keys.translated_locales.each do |locale|
+      texts = {}
+      Translate::Keys.new.i18n_keys(locale).each do |key|
+        if I18n.backend.send(:lookup, master_locale, key).to_s.present?
+          texts[key] = I18n.backend.send(:lookup, locale, key)
+        end
+      end
+      I18n.backend.send(:translations)[locale] = nil # Clear out all current translations
+      I18n.backend.store_translations(locale, Translate::Keys.to_deep_hash(texts))
+      Translate::Storage.new(locale).write_to_file      
     end
   end
 
@@ -69,7 +86,7 @@ namespace :translate do
     locale = new_translations.keys.first
 
     overwrites = false
-    Translate::Keys.new.send(:extract_i18n_keys, new_translations[locale]).each do |key|
+    Translate::Keys.to_shallow_hash(new_translations[locale]).keys.each do |key|
       new_text = key.split(".").inject(new_translations[locale]) { |hash, sub_key| hash[sub_key] }
       existing_text = I18n.backend.send(:lookup, locale.to_sym, key)
       if existing_text && new_text != existing_text        
@@ -82,6 +99,80 @@ namespace :translate do
     if !overwrites || ENV['OVERWRITE']
       I18n.backend.store_translations(locale, new_translations[locale])
       Translate::Storage.new(locale).write_to_file
+    end
+  end
+  
+  desc "Apply Google translate to auto translate all texts in locale ENV['FROM'] to locale ENV['TO']"
+  task :google => :environment do
+    raise "Please specify FROM and TO locales as environment variables" if ENV['FROM'].blank? || ENV['TO'].blank?
+
+    # Depends on httparty gem
+    # http://www.robbyonrails.com/articles/2009/03/16/httparty-goes-foreign
+    class GoogleApi
+      include HTTParty
+      base_uri 'ajax.googleapis.com'
+      def self.translate(string, to, from)
+        tries = 0
+        begin
+          get("/ajax/services/language/translate",
+            :query => {:langpair => "#{from}|#{to}", :q => string, :v => 1.0},
+            :format => :json)
+        rescue 
+          tries += 1
+          puts("SLEEPING - retrying in 5...")
+          sleep(5)
+          retry if tries < 10
+        end
+      end
+    end
+
+    I18n.backend.send(:init_translations)
+
+    start_at = Time.now
+    translations = {}
+    Translate::Keys.new.i18n_keys(ENV['FROM']).each do |key|
+      from_text = I18n.backend.send(:lookup, ENV['FROM'], key).to_s
+      to_text = I18n.backend.send(:lookup, ENV['TO'], key)
+      if !from_text.blank? && to_text.blank?
+        print "#{key}: '#{from_text[0, 40]}' => "
+        if !translations[from_text]
+          response = GoogleApi.translate(from_text, ENV['TO'], ENV['FROM'])
+          translations[from_text] = response["responseData"] && response["responseData"]["translatedText"]
+        end
+        if !(translation = translations[from_text]).blank?
+          translation.gsub!(/\(\(([a-z_.]+)\)\)/i, '{{\1}}')
+          # Google translate sometimes replaces {{foobar}} with (()) foobar. We skip these
+          if translation !~ /\(\(\)\)/
+            puts "'#{translation[0, 40]}'"
+            I18n.backend.store_translations(ENV['TO'].to_sym, Translate::Keys.to_deep_hash({key => translation}))
+          else
+            puts "SKIPPING since interpolations were messed up: '#{translation[0,40]}'"
+          end
+        else
+          puts "NO TRANSLATION - #{response.inspect}"
+        end
+      end
+    end
+    
+    puts "\nTime elapsed: #{(((Time.now - start_at) / 60) * 10).to_i / 10.to_f} minutes"    
+    Translate::Storage.new(ENV['TO'].to_sym).write_to_file
+  end
+
+  desc "List keys that have changed I18n texts between YAML file ENV['FROM_FILE'] and YAML file ENV['TO_FILE']. Set ENV['VERBOSE'] to see changes"
+  task :changed => :environment do
+    from_hash = Translate::Keys.to_shallow_hash(Translate::File.new(ENV['FROM_FILE']).read)
+    to_hash = Translate::Keys.to_shallow_hash(Translate::File.new(ENV['TO_FILE']).read)
+    from_hash.each do |key, from_value|
+      if (to_value = to_hash[key]) && to_value != from_value
+        key_without_locale = key[/^[^.]+\.(.+)$/, 1]
+        if ENV['VERBOSE']
+          puts "KEY: #{key_without_locale}"
+          puts "FROM VALUE: '#{from_value}'"
+          puts "TO VALUE: '#{to_value}'"
+        else
+          puts key_without_locale
+        end
+      end      
     end
   end
 end
