@@ -2,12 +2,12 @@ class TranslateController < ActionController::Base
   # It seems users with active_record_store may get a "no :secret given" error if we don't disable csrf protection,
   skip_before_filter :verify_authenticity_token
 
-  prepend_view_path(File.join(File.dirname(__FILE__), "..", "views"))
   layout 'translate'
 
   before_filter :init_translations
   before_filter :set_locale
-  
+
+  # GET /translate
   def index
     initialize_keys
     filter_by_key_pattern
@@ -17,9 +17,11 @@ class TranslateController < ActionController::Base
     paginate_keys
     @total_entries = @keys.size
   end
-  
+
+  # POST /translate
   def translate
-    I18n.backend.store_translations(@to_locale, Translate::Keys.to_deep_hash(params[:key]))
+    processed_parameters = process_array_parameters(params[:key])
+    I18n.backend.store_translations(@to_locale, Translate::Keys.to_deep_hash(processed_parameters))
     Translate::Storage.new(@to_locale).write_to_file
     Translate::Log.new(@from_locale, @to_locale, params[:key].keys).write_to_file
     force_init_translations # Force reload from YAML file
@@ -27,20 +29,21 @@ class TranslateController < ActionController::Base
     redirect_to params.slice(:filter, :sort_by, :key_type, :key_pattern, :text_type, :text_pattern).merge({:action => :index})
   end
 
+  # GET /translate/reload
   def reload
     Translate::Keys.files = nil
     redirect_to :action => 'index'
   end
-  
+
   private
   def initialize_keys
     @files = Translate::Keys.files
-    @keys = (@files.keys.map(&:to_s) + Translate::Keys.new.i18n_keys(@from_locale)).uniq    
+    @keys = (@files.keys.map(&:to_s) + Translate::Keys.new.i18n_keys(@from_locale)).uniq
     @keys.reject! do |key|
       from_text = lookup(@from_locale, key)
       # When translating from one language to another, make sure there is a text to translate from.
-      # Always exclude non string translation objects as we don't support editing them in the UI.
-      (@from_locale != @to_locale && !from_text.present?) || (from_text.present? && !from_text.is_a?(String))      
+      # The only supported formats are String and Array. We don't support other formats
+      (@from_locale != @to_locale && !from_text.present?) || (from_text.present? && !from_text.is_a?(String) && !from_text.is_a?(Array))
     end
   end
 
@@ -48,7 +51,7 @@ class TranslateController < ActionController::Base
     I18n.backend.send(:lookup, locale, key)
   end
   helper_method :lookup
-  
+
   def filter_by_translated_or_changed
     params[:filter] ||= 'all'
     return if params[:filter] == 'all'
@@ -65,7 +68,7 @@ class TranslateController < ActionController::Base
       end
     end
   end
-  
+
   def filter_by_key_pattern
     return if params[:key_pattern].blank?
     @keys.reject! do |key|
@@ -113,7 +116,7 @@ class TranslateController < ActionController::Base
       raise "Unknown sort_by '#{params[:sort_by]}'"
     end
   end
-  
+
   def paginate_keys
     params[:page] ||= 1
     @paginated_keys = @keys[offset, per_page]
@@ -122,24 +125,24 @@ class TranslateController < ActionController::Base
   def offset
     (params[:page].to_i - 1) * per_page
   end
-  
+
   def per_page
     50
   end
   helper_method :per_page
-  
+
   def init_translations
-    I18n.backend.send(:init_translations) unless I18n.backend.initialized?    
+    I18n.backend.send(:init_translations) unless I18n.backend.initialized?
   end
 
   def force_init_translations
     I18n.backend.send(:init_translations)
   end
-  
+
   def default_locale
     I18n.default_locale
   end
-  
+
   def set_locale
     session[:from_locale] ||= default_locale
     session[:to_locale] ||= :en
@@ -148,7 +151,7 @@ class TranslateController < ActionController::Base
     @from_locale = session[:from_locale].to_sym
     @to_locale = session[:to_locale].to_sym
   end
-  
+
   def old_from_text(key)
     return @old_from_text[key] if @old_from_text && @old_from_text[key]
     @old_from_text = {}
@@ -158,8 +161,21 @@ class TranslateController < ActionController::Base
     @old_from_text[key] = text
   end
   helper_method :old_from_text
-  
+
   def log_hash
     @log_hash ||= Translate::Log.new(@from_locale, @to_locale, {}).read
   end
+
+	def process_array_parameters(parameter)
+		reconstructed_hash = Hash.new
+
+		parameter.each do |key, value|
+			if value.is_a?(String)
+				reconstructed_hash[key] = value
+			elsif value.is_a?(Hash)
+				reconstructed_hash[key] = Translate::Keys.arraylize(value)
+			end
+		end
+		reconstructed_hash
+	end
 end

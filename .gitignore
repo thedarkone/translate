@@ -1,1 +1,4 @@
+*.yardoc
+*.gem
 spec/debug.log
+nbproject

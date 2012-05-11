@@ -7,19 +7,50 @@
 
     <%= translate_javascript_includes %>
 <script type="text/javascript">
-      google.load("language", "1");
+    var source_ids = [];
 
-      function getGoogleTranslation(id, text, from_language, to_language) {
-        text = text.replace(/\{\{/, '__').replace(/\}\}/, '__')
-        google.language.translate(text, from_language, to_language, function(result) {
-          if (!result.error) { 
-            result_text = result.translation.unescapeHTML().gsub(/__(.+)__/, function(match){
+    function googleCallback(response) {
+        if (response.error) {
+            alert(response.error.message);
+            return;
+        }
+        var result_text = response.data.translations[0].translatedText.gsub(/__(.+)__/, function(match) {
+          return '{{' + match[1] + '}}';
+        });
+        var id = source_ids.shift();
+        if (id) {
+            Form.Element.setValue(id, result_text);
+        }
+    }
+
+    function getGoogleTranslation(id, text, from_language, to_language) {
+        source_ids.push(id);
+        text = text.replace(/\{\{/, '__').replace(/\}\}/, '__');
+        var s = document.createElement('script'), api_key = '<%= Translate.api_key %>';
+        s.type = 'text/javascript';
+        s.src = 'https://www.googleapis.com/language/translate/v2?key=' + api_key + '&source=' +
+            from_language + '&target=' + to_language + '&callback=googleCallback&q=' + text;
+        document.getElementsByTagName("head")[0].appendChild(s);
+    }
+
+    function bingCallback(text) {
+        var id = source_ids.shift();
+        if (text && id) {
+            var result_text = text.gsub(/__(.+)__/, function(match) {
               return '{{' + match[1] + '}}';
             });
             Form.Element.setValue(id, result_text);
-          }
-        });
+        }
+    }
 
+    function getBingTranslation(id, text, from_language, to_language) {
+        source_ids.push(id);
+        text = text.replace(/\{\{/, '__').replace(/\}\}/, '__');
+        var s = document.createElement("script"), app_id = '<%= Translate.app_id %>';
+        s.type = 'text/javascript';
+        s.src = 'http://api.microsofttranslator.com/V2/Ajax.svc/Translate?oncomplete=bingCallback&appId=' +
+            app_id + '&from=' + from_language + '&to=' + to_language + '&text=' + text;
+        document.getElementsByTagName("head")[0].appendChild(s);
     }
 
     /*
@@ -271,6 +302,7 @@
 		padding:1em;
 		border-top: 0.2em solid transparent;
 		border-bottom:solid 0.2em #d46021;
+    border-left: solid 0.1em #D46021;
 		margin:0 1em 1em 1.6em;
 	}
 	div.translation input, div.translation textarea{
