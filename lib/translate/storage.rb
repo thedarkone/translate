@@ -19,10 +19,25 @@ class Translate::Storage
   
   private
   def keys
-    {locale => I18n.backend.send(:translations)[locale]}
+    {locale => deep_strip_procs(I18n.backend.send(:translations)[locale])}
   end
   
   def file_path
     File.join(Translate::Storage.root_dir, "config", "locales", "#{locale}.yml")
+  end
+
+  def deep_strip_procs(hash)
+    hash = hash.deep_dup
+    stack = [hash]
+    while current_hash = stack.pop
+      current_hash.each_key do |key|
+        if (value = current_hash[key]).kind_of?(Hash)
+          stack << value
+        elsif value.kind_of?(Proc)
+          current_hash.delete(key)
+        end
+      end
+    end
+    hash
   end
 end
