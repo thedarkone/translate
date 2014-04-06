@@ -2,6 +2,7 @@ require 'ya2yaml'
 
 module Translate
   class Engine < Rails::Engine
+    rake_tasks { load('tasks/translate.rake') }
   end if defined?(Rails) && Rails::VERSION::MAJOR >= 3
 
   class << self
