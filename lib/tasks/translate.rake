@@ -97,8 +97,10 @@ namespace :translate do
     end
 
     if !overwrites || ENV['OVERWRITE']
-      I18n.backend.store_translations(locale, new_translations[locale])
-      Translate::Storage.new(locale).write_to_file
+      storage = Translate::Storage.new(locale)
+      storage.load_from_file
+      storage.update_file_keys!(new_translations)
+      storage.write_to_file
     end
   end
   
